@@ -21,6 +21,10 @@
     {
       "date": "2026-11-17",
       "text": "a8cbb28 is on the local gvisor branch, which is neither pushed nor merged. The fix is in the podman engine's create, so podman and gVisor sandboxes both have it."
+    },
+    {
+      "date": "2026-11-17",
+      "text": "The branch was rebased onto main at b9ee8bb, and this record now cites the rebased commits. The verification above ran on the same changes before the rebase. Over 3c10458, the rebased branch, `make ci` passed. There, `go test ./internal/engine/ -count=1 -run TestPodmanCreateReapsAFailedRun -v` passed all six subtests."
     }
   ],
   "links": []

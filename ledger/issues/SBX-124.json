@@ -36,6 +36,10 @@
     {
       "date": "2026-11-17",
       "text": "Commit af200a5 makes `make setup-smoke` run `cs-sandbox build --engine gvisor` on a Linux host with podman, when SMOKE_TESTS names TestCLIGVisorLive. CI's ubuntu-26.04, ubuntu-26.04-arm and WSL2 smoke legs all run setup-smoke, so each now fetches the pinned release and checks its digest. The ubuntu-26.04 job prints `doctor --engine gvisor` and the AppArmor userns setting first. Local make ci over that tree fetched runsc inside setup-smoke, and TestCLIGVisorLive passed its three subtests.\n\nThe branch is not pushed, so no CI run has executed the member yet. This stays open until one passes it."
+    },
+    {
+      "date": "2026-11-17",
+      "text": "The branch was rebased onto main at b9ee8bb, which builds on the base tiers that dbe4654 pins. This record now cites the rebased commits. The notes above measured the same changes before the rebase, when the branch sat on 692b50a. Over 3c10458, the rebased branch, `make ci` passed with 14 smoke tests and all six agent replay cells, and none skipped. TestCLIGVisorLive passed its running, nested and restart subtests there. No CI run has executed the member yet, so this stays open."
     }
   ],
   "links": []
