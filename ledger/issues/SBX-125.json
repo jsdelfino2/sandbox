@@ -1,0 +1,20 @@
+{
+  "id": "SBX-125",
+  "title": "A create whose podman run fails leaves its two volumes, and ls then lists a sandbox nobody removed",
+  "type": "defect",
+  "severity": "low",
+  "status": "open",
+  "foundBy": "session agent, 2026-11-16, while a gVisor experiment's `create --privileged` failed at `podman run`",
+  "opened": "2026-11-16",
+  "resolved": null,
+  "stint": null,
+  "evidence": {
+    "commits": [],
+    "integrated": [],
+    "verified": null
+  },
+  "resolution": null,
+  "details": "`Podman.Create` (internal/engine/podman.go) returns as soon as `podman run` fails. The deferred reap that removes a partial sandbox is armed only after the run succeeds. Podman has already created the named volumes the run mounts by then, `cs-sandbox-home-<name>.<group>` and `cs-sandbox-containers-<name>.<group>`, so both stay. `ls` reads a home volume with no instance as data `rm` kept, and lists the name as `removed`.\n\nSeen on 2026-11-16 in an experiment group: `create gp1 --group gvexp2 --privileged` under gVisor failed at `podman run`, and `group rm gvexp2 -f` then left both volumes. To reproduce, make `podman run` fail after it has parsed its volumes, for example with a runtime that refuses the container. A create that never ran should leave nothing behind, so the reap belongs before the run, scoped to volumes this create made (`reusingData` already tells the two apart).",
+  "notes": [],
+  "links": []
+}
