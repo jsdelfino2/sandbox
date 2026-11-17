@@ -16,7 +16,8 @@ import (
 
 // requireGVisor skips unless the pinned runsc is in the artifact cache. A create
 // would fetch it, but a test run is not the place to download 65 MB nobody asked
-// for: `cs-sandbox build --engine gvisor` is.
+// for: `cs-sandbox build --engine gvisor` is, and `make setup-smoke` runs it on
+// every Linux host with podman.
 func requireGVisor(t *testing.T) {
 	t.Helper()
 	if err := (gvisor.Cache{Dir: gvisor.Dir(paths.FCCache())}).Verify(gvisor.Version()); err != nil {

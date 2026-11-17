@@ -552,6 +552,16 @@ jobs:
           podman load -i bin/cs-sandbox-ci.tar
           podman image exists "$CS_SANDBOX_IMAGE"
 
+      # Informational, like the firecracker job's doctor step: what this runner
+      # offers a gVisor sandbox. setup-smoke, inside the smoke step, fetches the
+      # pinned runsc, and TestCLIGVisorLive then boots a gVisor sandbox (SPEC
+      # §11.6). The AppArmor knob is printed because Ubuntu restricts the user
+      # namespaces that rootless runtimes create.
+      - name: doctor (gvisor)
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          go run ./cmd/cs-sandbox doctor --engine gvisor || true
+
       # SMOKE_AGENTS=0: the agent matrix used to be the second half of this
       # job, fourteen sandboxes booted one after another in a single log. It is
       # its own fan-out now (agents-podman below, one job per cell), which is
