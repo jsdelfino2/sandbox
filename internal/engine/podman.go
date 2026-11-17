@@ -355,18 +355,27 @@ func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance
 		d.ensureSlice(ctx)
 	}
 	d.say("starting the container…")
+	// A create that fails takes away what it made (R179), including a failed
+	// run. By the time `podman run` fails, podman has made the data volumes,
+	// and it can leave the container behind in the Created state.
+	//
+	// What it found stays. Volumes an earlier `rm` kept are this name's data.
+	// A container that already holds the name belongs to something else, such
+	// as another create of the same name that took the lock first. A run fails
+	// on that container, and removing it would end a sandbox this create never
+	// made. A run that succeeds proves the name was free, so after it the
+	// container is this create's own.
 	reusingData := d.volumeExists(ctx, params.HomeVol)
-	if _, err = d.Runner.Run(ctx, run.Opts{}, argv...); err != nil {
-		return nil, fmt.Errorf("podman run: %w", err)
-	}
-	started := true
+	reap := !d.containerExists(ctx, params.Obj)
 	defer func() {
-		if err != nil && started {
-			// Preserve a home volume kept by an earlier `rm`; otherwise remove
-			// the partial container and the data volumes it just created.
+		if err != nil && reap {
 			_ = p.Remove(context.Background(), s.Name, !reusingData)
 		}
 	}()
+	if _, err = d.Runner.Run(ctx, run.Opts{}, argv...); err != nil {
+		return nil, fmt.Errorf("podman run: %w", err)
+	}
+	reap = true
 
 	if err = d.save(inst); err != nil {
 		return nil, err
@@ -384,7 +393,6 @@ func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance
 			return nil, err
 		}
 	}
-	started = false
 	return inst, nil
 }
 
@@ -675,6 +683,11 @@ func (d Deps) networkGateway(ctx context.Context) string {
 
 func (d Deps) volumeExists(ctx context.Context, vol string) bool {
 	_, err := d.Runner.Run(ctx, run.Opts{ReadOnly: true}, "podman", "volume", "exists", vol)
+	return err == nil
+}
+
+func (d Deps) containerExists(ctx context.Context, name string) bool {
+	_, err := d.Runner.Run(ctx, run.Opts{ReadOnly: true}, "podman", "container", "exists", name)
 	return err == nil
 }
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,6 +214,52 @@ func TestCreateRefusesKeptDiskFromAnotherImage(t *testing.T) {
 	for _, f := range []string{"rootfs.ext4", fcdisk.RootfsImage} {
 		if !statOK(filepath.Join(idir, f)) {
 			t.Errorf("a refused create removed %s", f)
+		}
+	}
+}
+
+// A create whose podman run fails takes away the container and the data volumes
+// that run made (R179). Before it did, both volumes stayed, and `ls` listed the
+// name as one `rm` had kept. What the create found stays: volumes an earlier
+// `rm` kept, and a container that already held the name.
+func TestPodmanCreateReapsAFailedRun(t *testing.T) {
+	missing := errors.New("exit status 1")
+	for _, tc := range []struct {
+		name                  string
+		haveVolume, haveCont  bool
+		wantRmCont, wantRmVol bool
+	}{
+		{name: "fresh name", wantRmCont: true, wantRmVol: true},
+		{name: "data kept by rm", haveVolume: true, wantRmCont: true},
+		{name: "name already held", haveVolume: true, haveCont: true},
+	} {
+		for _, gv := range []bool{false, true} {
+			t.Run(tc.name+map[bool]string{false: "/podman", true: "/gvisor"}[gv], func(t *testing.T) {
+				f, d := gvisorFake(t, true)
+				if !tc.haveVolume {
+					f.On("podman volume exists", run.Result{}, missing)
+				}
+				if !tc.haveCont {
+					f.On("podman container exists", run.Result{}, missing)
+				}
+				f.On("podman run -d", run.Result{}, errors.New("exit status 126"))
+				p := NewPodman(d)
+				if gv {
+					p = NewGVisor(d)
+				}
+				_, err := p.Create(context.Background(), CreateSpec{Name: "box", Type: "agent", Pids: DefaultPids})
+				if err == nil || !strings.Contains(err.Error(), "podman run") {
+					t.Fatalf("Create = %v, want the run's failure", err)
+				}
+				if got := f.Contains("podman rm -f box.default"); got != tc.wantRmCont {
+					t.Errorf("container removed = %v, want %v: %s", got, tc.wantRmCont, f)
+				}
+				for _, v := range []string{"cs-sandbox-home-box.default", "cs-sandbox-containers-box.default"} {
+					if got := f.Contains("podman volume rm -f " + v); got != tc.wantRmVol {
+						t.Errorf("%s removed = %v, want %v: %s", v, got, tc.wantRmVol, f)
+					}
+				}
+			})
 		}
 	}
 }

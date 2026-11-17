@@ -1256,6 +1256,16 @@ R101 keeps the engines consistent. A microVM is reached over ssh, which lands as
 So a command behaves the same whichever engine runs it, and the files it creates are owned by you
 rather than by root.
 
+**R179.** A container create that fails **MUST** remove the container and the data volumes it made, as
+R140 asks of a microVM, and that includes a failed `podman run`. The reap **MUST NOT** remove volumes
+an earlier `rm` kept, or a container that held the name before the run.
+
+Podman makes the data volumes before it starts the container, and it can leave the container behind
+in the Created state. A volume left that way is not harmless: `ls` reads a home volume with no
+sandbox as data that `rm` kept, and lists a name nobody removed. A container that already holds the
+name can be another create of the same name that took the lock first. The run fails on it, and
+removing it would end a sandbox this create never made.
+
 ### 11.2 Nested Podman
 
 True isolated Podman-in-Podman needs a scaled-down capability set on the outer container and a
