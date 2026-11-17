@@ -518,19 +518,25 @@ func gvisorCreatable(isMacOS, privileged bool) error {
 // gvisorLines are what create says of a gVisor sandbox (R178): what runs it,
 // every limit that applies, and how its nested containers reach the network.
 func gvisorLines(inst *state.Instance, release string) []string {
-	var caps []string
+	var caps, stops []string
 	if inst.Pids > 0 {
 		caps = append(caps, fmt.Sprintf("%d host tasks", inst.Pids))
+		stops = append(stops, "task")
 	}
 	if inst.CPUs > 0 {
 		caps = append(caps, fmt.Sprintf("%d CPUs", inst.CPUs))
 	}
 	if inst.MemMiB > 0 {
 		caps = append(caps, fmt.Sprintf("%d MiB of memory", inst.MemMiB))
+		stops = append(stops, "memory")
 	}
 	limits := "none: nothing caps this sandbox's tasks, CPU or memory (`cs-sandbox doctor --engine gvisor` says what this host offers)"
 	if len(caps) > 0 {
-		limits = strings.Join(caps, ", ") + "; reaching the task or memory cap stops the whole sandbox"
+		limits = strings.Join(caps, ", ")
+	}
+	// A CPU cap throttles; the other two end the sandbox, so say which apply.
+	if len(stops) > 0 {
+		limits += "; reaching the " + strings.Join(stops, " or ") + " cap stops the whole sandbox"
 	}
 	return []string{
 		"runtime:  gVisor " + release + " answers this sandbox's system calls in a kernel of its own",

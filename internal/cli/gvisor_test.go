@@ -44,8 +44,16 @@ func TestGVisorLines(t *testing.T) {
 		}
 	}
 	got = strings.Join(gvisorLines(&state.Instance{Engine: state.GVisor, Pids: 8192}, "20261109.0"), "\n")
-	if strings.Contains(got, "CPUs") || strings.Contains(got, "MiB") {
+	if strings.Contains(got, "CPUs") || strings.Contains(got, "MiB") || strings.Contains(got, "memory cap") {
 		t.Errorf("a cap that was not applied is named:\n%s", got)
+	}
+	if !strings.Contains(got, "limits:   8192 host tasks; reaching the task cap stops the whole sandbox") {
+		t.Errorf("a task cap alone:\n%s", got)
+	}
+	// A CPU cap throttles rather than stopping anything, so it promises no stop.
+	got = strings.Join(gvisorLines(&state.Instance{Engine: state.GVisor, CPUs: 2}, "20261109.0"), "\n")
+	if !strings.Contains(got, "limits:   2 CPUs\n") {
+		t.Errorf("a CPU cap alone:\n%s", got)
 	}
 	got = strings.Join(gvisorLines(&state.Instance{Engine: state.GVisor}, "20261109.0"), "\n")
 	if !strings.Contains(got, "limits:   none: nothing caps") {
