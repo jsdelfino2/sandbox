@@ -8,7 +8,7 @@
 
 ```
 cs-sandbox create <name> [--repo PATH] [--snapshot PATH] [--type agent|user]
-                         [--engine podman|firecracker] [--group NAME]
+                         [--engine podman|firecracker|gvisor] [--group NAME]
                          [--inherit-agent-login AGENT] [--lend-agent-login AGENT]
                          [--inherit-api-key PROVIDER] [--lend-api-key PROVIDER]
                          [--yolo] [--solo] …
@@ -42,8 +42,8 @@ Global: [-v|--verbose] [-q|--quiet] [--dry-run]
 
 ## Description
 
-`cs-sandbox` is a host tool. It creates named Linux sandboxes, each a rootless Podman container or
-a Firecracker microVM built from one image. A shared network joins them, so every sandbox is
+`cs-sandbox` is a host tool. It creates named Linux sandboxes, each a rootless Podman container,
+optionally run by gVisor, or a Firecracker microVM, all built from one image. A shared network joins them, so every sandbox is
 reachable by name over SSH.
 
 Nothing on your host enters a sandbox unless you name it. Code goes in through `--repo` or
@@ -79,7 +79,7 @@ Firecracker where the host has KVM, and to Podman otherwise.
 | `--repo PATH[@REF][:NAME]` | Share a git repo. It lands at `~/<name>` on branch `cs-sandbox/<sandbox>`, borrowing the source's objects read-only. Repeatable. |
 | `--snapshot PATH[:NAME]` | Share a frozen read-only copy of any directory at `~/<name>`. Repeatable. |
 | `--type agent\|user` | What this sandbox may reach over SSH. Default `agent`. See [SSH trust](#ssh-trust). |
-| `--engine podman\|firecracker` | Which engine backs it. Default: Firecracker on Linux with KVM, Podman otherwise. |
+| `--engine podman\|firecracker\|gvisor` | Which engine backs it. Default: Firecracker on Linux with KVM, Podman otherwise. `gvisor` is never a default. See [A gVisor sandbox](#a-gvisor-sandbox). |
 | `--group NAME` | The group whose network, keys and gateway it joins. Default `default`. |
 | `--lend-agent-login AGENT` | **Lend** a host agent login: `claude` or `codex`. The sandbox gets a fabricated credential; yours never enters it. Repeatable and comma-separated. |
 | `--lend-api-key PROVIDER` | **Lend** an LLM API key from `~/.cs-keys/<provider>`: `anthropic`, `openai` or `fireworks`. Same trade. Repeatable and comma-separated. |
@@ -95,12 +95,12 @@ Firecracker where the host has KVM, and to Podman otherwise.
 | `-e`, `--env KEY=VALUE` | Inject an environment variable, or `KEY` alone to pass the host's value. Repeatable. |
 | `--env-file PATH` | Inject variables from a file. Repeatable. |
 | `--image-store NAME` | Mount a shared image store read-only. Repeatable. |
-| `--cpus N` | Firecracker vCPUs, default 4. On Podman, a CPU cap, applied only when given. |
-| `--mem MiB` | Firecracker memory, default 4096. On Podman, a memory cap with no swap, applied only when given. |
-| `--pids N` | Podman: the container's process limit. Default 8192, and `0` for none. |
+| `--cpus N` | Firecracker vCPUs, default 4. On Podman and gVisor, a CPU cap, applied only when given. |
+| `--mem MiB` | Firecracker memory, default 4096. On Podman and gVisor, a memory cap with no swap, applied only when given. |
+| `--pids N` | Podman: the container's process limit. gVisor: the sandbox's host task limit. Default 8192, and `0` for none. |
 | `--disk GiB` | Firecracker disk size, grow-only. Default: the base rootfs size, 32. |
 | `--reuse-kept-disk` | Firecracker: boot the disk `rm` kept for this name even when another image made it. |
-| `--privileged` | Podman: use `--privileged` instead of the scaled-down capability set. |
+| `--privileged` | Podman: use `--privileged` instead of the scaled-down capability set. Refused under gVisor. |
 
 Every sandbox runs under one systemd user slice, `cs-sandbox.slice`, so the fleet as a whole cannot
 starve your desktop. The slice is capped at 75% of memory with no swap, all but an eighth of the
@@ -130,6 +130,42 @@ Recreating with the name of a sandbox that `rm` kept data for reuses that data. 
 data is the whole root disk, so it carries the tools of the image it was made from. `create` prints
 which image that was. It refuses a disk from another image unless given `--reuse-kept-disk`, and
 `destroy` deletes the disk so the name starts fresh. A disk that records no image is reused.
+
+#### A gVisor sandbox
+
+`--engine gvisor` creates a Podman sandbox whose container runs under gVisor's `runsc` rather than
+Podman's own runtime. The sandbox's system calls then reach gVisor, a kernel written in user space,
+rather than the host kernel. It needs Linux and no KVM, which makes it the stronger choice where
+Firecracker cannot run.
+
+The first `create --engine gvisor` downloads the gVisor release this build pins into the artifact
+cache. It checks the download against a digest committed in the source, and keeps each release in a
+directory of its own. `cs-sandbox build --engine gvisor` does the same ahead of time.
+
+`create` says what applies, in three lines:
+
+```
+  runtime:  gVisor 20261109.0 answers this sandbox's system calls in a kernel of its own
+  limits:   8192 host tasks, 2048 MiB of memory; reaching the task or memory cap stops the whole sandbox
+  nested containers: share this sandbox's network, so podman's -p publishes nothing; a service answers on the port it binds
+```
+
+The limits sit on a systemd user scope of the sandbox's own, under `cs-sandbox.slice`, made on
+every `create` and `start`. `--pids` counts host tasks, which are the guest's threads together with
+gVisor's own. A sandbox that reaches its task or memory cap stops as a whole, rather than one
+process inside it failing. With no systemd user session, the line reads `none`, and nothing caps the
+sandbox.
+
+A gVisor sandbox differs from a Podman one in four more ways:
+
+- Changes to its root filesystem are gone after `stop` and `start`. Its home and its nested image
+  store persist.
+- `podman cp` cannot reach it. Use `exec`, `ssh` or `scp`.
+- A nested container shares the sandbox's network. gVisor refuses the mount rootless Podman pins a
+  new namespace with.
+- System calls cost more, so starting processes is slower than in a Podman sandbox.
+
+[SPEC.md §11.6](SPEC.md#116-the-gvisor-runtime) gives the reason for each.
 
 ### Working in a sandbox
 
@@ -246,7 +282,7 @@ cs-sandbox rm-store [-f] <name>
 ### Host setup
 
 ```
-cs-sandbox build [--engine ENGINE]...     # the image, and the Firecracker artifacts
+cs-sandbox build [--engine ENGINE]...     # the image, and the Firecracker artifacts or gVisor
 cs-sandbox build --slim                   # the CI image instead: no developer toolchains
 cs-sandbox build --rebuild-base           # rebuild the OS/toolchain and agent tiers too
 cs-sandbox build --local-modules none     # install the cs- tools from published modules only
@@ -274,7 +310,8 @@ cache along with it.
 
 With no `--engine`, `build` sets up every engine the host supports, and fails on a
 Firecracker-capable host whose Firecracker packages are missing. Restrict it with `--engine podman`
-for the image alone. The flag is repeatable, so `--engine podman --engine firecracker` names both.
+for the image alone. `--engine gvisor` adds gVisor's `runsc`, which no bare `build` fetches. The
+flag is repeatable, so `--engine podman --engine firecracker` names both.
 
 The image is built in **three tiers**, and `build` makes only the last of them. Two tiers are
 pulled at the tag `image/tiers.env` pins: the OS and the toolchains
@@ -982,7 +1019,7 @@ without disturbing your real one, which is what the test suite does.
 | `CS_SANDBOX_HOME` | Relocate all state under one root. Sets the three directories below at once. |
 | `CS_SANDBOX_INSTANCES_DIR` | The instance records directory. |
 | `CS_SANDBOX_TIER_DIR` | The tier keys directory. |
-| `CS_SANDBOX_FC_CACHE` | The Firecracker artifact cache. |
+| `CS_SANDBOX_FC_CACHE` | The artifact cache: the Firecracker artifacts, and the gVisor releases under `gvisor/`. |
 | `CS_SANDBOX_FC_NET` | The fabric working directory, which `CS_SANDBOX_HOME` deliberately leaves alone. |
 | `XDG_DATA_HOME`, `XDG_CACHE_HOME` | The defaults the paths above derive from. |
 | `CS_SANDBOX_AGENT_HOME` | Where a login or a key is read from, by `--inherit-agent-login` and by the lender alike. Your home, unless this names another profile tree. |
@@ -1023,6 +1060,12 @@ you to one.
 | `CS_SANDBOX_FC_NO_CGROUP` | unset | Set to anything to launch microVMs outside a cgroup. |
 | `CS_SANDBOX_FC_IO_ENGINE` | `Async` where io_uring works | The block engine for microVM disks, `Sync` or `Async`. `doctor` says which one this host gets and why. |
 | `CS_SANDBOX_NO_KSM` | unset | Set to anything to stop offering guest memory to KSM. |
+
+The fourth tunes the gVisor engine.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CS_SANDBOX_GVISOR_VERSION` | `20261109.0` | The gVisor release `build` and `create` download. An override has no committed digest and falls back to the checksum gVisor publishes, and says so. |
 
 ## Exit status
 
@@ -1138,8 +1181,8 @@ names what does: stop that, then create again. `cs-sandbox doctor` reports the s
 
 **Anything about a missing prerequisite**
 
-Run `cs-sandbox doctor`, which names the gap and the fix. Add `--engine podman` or `--engine
-firecracker` to check a specific engine, and `--slim` to ask about the CI image rather than the
+Run `cs-sandbox doctor`, which names the gap and the fix. Add `--engine podman`, `--engine
+firecracker` or `--engine gvisor` to check a specific engine, and `--slim` to ask about the CI image rather than the
 shipped one. The report is about one image, so a host ready for one variant can be reported as
 ready while the other cannot boot at all.
 
@@ -1203,4 +1246,5 @@ cs-sandbox destroy <name> -f
 
 [README.md](README.md) for the tour, [INSTALL.md](INSTALL.md) for host setup, [SPEC.md](SPEC.md)
 for the model and the guarantees, and [CONTRIBUTING.md](CONTRIBUTING.md) for working on
-`cs-sandbox` itself. Both engines are specified in [SPEC.md](SPEC.md), sections 11 and 12.
+`cs-sandbox` itself. The engines are specified in [SPEC.md](SPEC.md), sections 11 and 12, and gVisor
+in section 11.6.

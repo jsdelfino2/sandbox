@@ -441,6 +441,10 @@ setup-smoke: tools
 ## microVM -> sandbox -> container stack; it self-skips without /dev/kvm, the FC
 ## artifacts, or a slim image — so on the legs that lack them (macOS, WSL2) it
 ## costs nothing at all.
+##
+## TestCLIGVisorLive is the only member that reaches the gVisor engine. It
+## self-skips unless `cs-sandbox build --engine gvisor` has put the pinned runsc
+## in the artifact cache, which nothing in CI does yet.
 SMOKE_TESTS ?= Smoke \
                TestPodmanCreateLive \
                TestCLICreateExecDestroyLive \
@@ -449,7 +453,8 @@ SMOKE_TESTS ?= Smoke \
                TestCLINetworkReachabilityLive \
                TestCLILendKeyLive \
                TestCLIPortForwardLive \
-               TestCLINestedSandboxInVMLive
+               TestCLINestedSandboxInVMLive \
+               TestCLIGVisorLive
 
 # Joined into one -run alternation. A backslash continuation in make becomes a
 # space, so the list is written space-separated and the spaces are substituted

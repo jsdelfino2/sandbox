@@ -24,6 +24,8 @@ func (a *App) engineFor(name string) (engine.Engine, *state.Instance, error) {
 	switch in.Engine {
 	case state.Firecracker:
 		return engine.NewFirecracker(d), in, nil
+	case state.GVisor:
+		return engine.NewGVisor(d), in, nil
 	default:
 		return engine.NewPodman(d), in, nil
 	}

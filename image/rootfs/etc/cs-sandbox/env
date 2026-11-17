@@ -18,6 +18,11 @@
 # executablePath). The image ships Chromium.
 CHROME_BIN=/usr/bin/chromium-browser
 
+# gVisor shows a sandbox cgroup v1, and podman prints a deprecation warning
+# about it on every command. Nothing in a sandbox uses podman's cgroups (the
+# nested engine runs with them disabled), so the warning tells nobody anything.
+PODMAN_IGNORE_CGROUPSV1_WARNING=1
+
 # Claude Code is a pinned binary in read-only /opt, which matches none of its
 # known installMethods — so its install-health check nags, and its auto-updater
 # would shadow-install a newer build into ~/.local. Both off.

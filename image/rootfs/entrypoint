@@ -92,6 +92,19 @@ chmod 440 /etc/sudoers.d/cs-sandbox
 # needs; see the script and SPEC.md §11.2.
 /sandbox/nested-rootless "$CS_SANDBOX_USER" "$CS_SANDBOX_UID" "$CS_SANDBOX_GID"
 
+# Under gVisor a nested container shares this sandbox's network namespace (SPEC.md R177). Rootless
+# podman pins a new namespace with one mount(2) passing MS_BIND with MS_SHARED, which Linux accepts
+# and gVisor refuses with EINVAL, so a nested container with a network of its own never starts.
+# A system drop-in, so a user's own containers.conf can still say otherwise.
+GVISOR_CONF=/etc/containers/containers.conf.d/50-cs-sandbox-gvisor.conf
+if [ "${CS_SANDBOX_GVISOR:-0}" = 1 ]; then
+  mkdir -p "${GVISOR_CONF%/*}"
+  printf '# Written by the cs-sandbox entrypoint under gVisor (SPEC.md R177).\n[containers]\nnetns = "host"\n' > "$GVISOR_CONF"
+  chmod 644 "$GVISOR_CONF"
+else
+  rm -f "$GVISOR_CONF"
+fi
+
 # --- home: ensure it exists, seed on first boot, fix ownership -------------------
 # IMPORTANT: never `chown -R "$CS_SANDBOX_HOME"` — repos are bind-mounted UNDER the home and
 # may contain files we can't (and must not) chown. Touch only the home dir itself and

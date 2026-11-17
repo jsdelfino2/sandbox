@@ -75,6 +75,9 @@ type Deps struct {
 	KernelSet string
 	InstDir   string // instances root: the reflink destination
 
+	GVisorPin      string   // the gVisor release this build runs (CS_SANDBOX_GVISOR_VERSION / the pin)
+	GVisorReleases []string // the gVisor releases the artifact cache holds
+
 	// Lend is what the CLI found out about credential lending on this host.
 	Lend LendState
 
@@ -89,7 +92,7 @@ type Deps struct {
 	ToolPins map[string]string
 }
 
-// Diagnose runs the checks for the given engine ("podman" | "firecracker").
+// Diagnose runs the checks for the given engine ("podman" | "firecracker" | "gvisor").
 func Diagnose(ctx context.Context, engine string, d Deps) *Report {
 	r := &Report{Engine: engine}
 	pkg := "dnf install"
@@ -156,7 +159,7 @@ func Diagnose(ctx context.Context, engine string, d Deps) *Report {
 	// rootless userns. On macOS the containers run inside the podman-machine VM,
 	// which maps its own subuid/subgid ranges — there is nothing (and no
 	// /etc/subuid, nor a usermod) on the Mac itself.
-	ug := Group{Title: "rootless user namespaces (both engines)"}
+	ug := Group{Title: "rootless user namespaces (every engine)"}
 	switch {
 	case d.IsMacOS:
 		ug.add(OK, "handled inside the podman machine VM (no host subuid/subgid needed on macOS)")
@@ -224,12 +227,13 @@ func Diagnose(ctx context.Context, engine string, d Deps) *Report {
 	}
 	r.addGroup(cg)
 
-	if engine == "firecracker" && d.IsMacOS {
+	switch {
+	case engine == "firecracker" && d.IsMacOS:
 		// No KVM on a Mac, so none of the host-side microVM checks apply.
 		fg := Group{Title: "firecracker microVM engine (Linux/KVM)"}
 		fg.add(NO, "firecracker needs a Linux host with KVM — on macOS use:  cs-sandbox doctor --engine podman")
 		r.addGroup(fg)
-	} else if engine == "firecracker" {
+	case engine == "firecracker":
 		fg := Group{Title: "firecracker microVM engine (Linux/KVM)"}
 		switch {
 		case writable("/dev/kvm"):
@@ -290,6 +294,8 @@ func Diagnose(ctx context.Context, engine string, d Deps) *Report {
 		// block engine of its own.
 		r.addGroup(diskIOGroup())
 		r.addGroup(memoryGroup())
+	case engine == "gvisor":
+		r.addGroup(gvisorGroup(d))
 	}
 
 	r.addGroup(limitsGroup(ctx, engine, d))
