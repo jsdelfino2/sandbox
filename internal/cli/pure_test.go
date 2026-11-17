@@ -170,6 +170,10 @@ func TestCreateSizing(t *testing.T) {
 		{"podman zero cap", createFlags{engine: "podman", cpus: 0, mem: 2048}, both, 0, 0, "--cpus"},
 		{"podman negative pids", createFlags{engine: "podman", pids: -1}, none, 0, 0, "--pids"},
 		{"firecracker zero mem", createFlags{engine: "firecracker", cpus: 4}, none, 0, 0, "--mem"},
+		// A gVisor sandbox is a container: capped only when asked, as podman is.
+		{"gvisor defaults", createFlags{engine: "gvisor", cpus: 4, mem: 4096, pids: 8192}, none, 0, 0, ""},
+		{"gvisor caps", createFlags{engine: "gvisor", cpus: 2, mem: 2048}, both, 2, 2048, ""},
+		{"unknown engine", createFlags{engine: "kata"}, none, 0, 0, "podman, firecracker or gvisor"},
 	}
 	for _, c := range cases {
 		cpus, mem, err := createSizing(&c.f, c.given)

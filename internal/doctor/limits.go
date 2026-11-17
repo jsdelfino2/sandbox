@@ -20,7 +20,7 @@ var (
 // limits the host can apply (R171). All advisory: a host with neither still
 // runs every sandbox, only without the caps that keep the desktop responsive.
 func limitsGroup(ctx context.Context, engine string, d Deps) Group {
-	g := Group{Title: "resource limits (both engines)"}
+	g := Group{Title: "resource limits (every engine)"}
 	c := hostCgroups(hostenv.Host{UID: os.Getuid(), IsMacOS: d.IsMacOS, IsWSL: d.IsWSL})
 	// Only the systemd manager takes a slice as a container's cgroup parent. A
 	// manager podman cannot name is not reported here: doctor's podman checks

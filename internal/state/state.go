@@ -293,6 +293,10 @@ type Engine string
 const (
 	Podman      Engine = "podman"
 	Firecracker Engine = "firecracker"
+	// GVisor is the Podman engine with its container run by gVisor's runsc
+	// (SPEC §11.6). It is a container in every other respect, so anything that
+	// tells a microVM from a container treats it as one.
+	GVisor Engine = "gvisor"
 )
 
 // RepoClone records one --repo share: which host repo was shared, where it

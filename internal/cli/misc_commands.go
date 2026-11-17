@@ -13,6 +13,7 @@ import (
 	assets "github.com/codesweep-ai/sandbox"
 	"github.com/codesweep-ai/sandbox/internal/engine"
 	"github.com/codesweep-ai/sandbox/internal/fcdisk"
+	"github.com/codesweep-ai/sandbox/internal/gvisor"
 	"github.com/codesweep-ai/sandbox/internal/run"
 	"github.com/spf13/cobra"
 )
@@ -28,7 +29,8 @@ func newBuildCmd(app *App) *cobra.Command {
 			"With no flags it sets up every engine the host supports: the podman image always,\n" +
 			"plus the Firecracker binary/kernel/rootfs on a Firecracker-capable host (and it fails\n" +
 			"if the Firecracker host packages are missing). Restrict with --engine, e.g.\n" +
-			"`--engine podman` for the image only, or `--engine firecracker` to force the FC set.\n\n" +
+			"`--engine podman` for the image only, or `--engine firecracker` to force the FC set.\n" +
+			"`--engine gvisor` also fetches gVisor's runsc, which no default includes.\n\n" +
 			"The image is built in three tiers, and by default this builds only the last of them:\n" +
 			"the OS and toolchains (" + baseImageRepo + ")\n" +
 			"and the agent CLIs on top of them (" + agentsImageRepo + ")\n" +
@@ -59,19 +61,19 @@ func newBuildCmd(app *App) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringArrayVar(&engines, "engine", nil,
-		"engine to set up: podman | firecracker (repeatable; default: every engine the host supports)")
+		"engine to set up: podman | firecracker | gvisor (repeatable; default: podman, and firecracker where the host supports it)")
 	cmd.Flags().BoolVar(&slim, "slim", false,
 		"build the slimmed CI image (no developer toolchains) instead of the shipped one")
 	cmd.Flags().BoolVar(&rebuildBase, "rebuild-base", false,
 		"build the OS/toolchain and agent tiers locally too, instead of pulling the tags image/Containerfile pins")
 	cmd.Flags().StringVar(&localModules, "local-modules", "",
 		"the build store to install unpublished cs- tool versions from, or none for published modules only (default: this owner's store)")
-	_ = cmd.RegisterFlagCompletionFunc("engine", fixedComp("podman", "firecracker"))
+	_ = cmd.RegisterFlagCompletionFunc("engine", fixedComp("podman", "firecracker", "gvisor"))
 	return cmd
 }
 
 func runBuild(cmd *cobra.Command, app *App, engines []string, slim bool, localModules string, rebuildBase bool) error {
-	wantFC, err := buildWantsFirecracker(app, engines)
+	wantFC, wantGV, err := buildEngines(app, engines)
 	if err != nil {
 		return err
 	}
@@ -184,6 +186,20 @@ func runBuild(cmd *cobra.Command, app *App, engines []string, slim bool, localMo
 		if note := otherKernelNote(fcdisk.Cache{Dir: app.FCCache}, engine.NewFirecracker(d).KernelSet()); note != "" {
 			app.phase(note)
 		}
+	}
+	// gVisor's runsc, fetched and checked against the digest this build pins
+	// (R174). It needs nothing from the image, but a gvisor create needs both.
+	if wantGV {
+		if err := gvisorCreatable(app.Host.IsMacOS, false); err != nil {
+			return err
+		}
+		app.phase("setting up gVisor…")
+		d := app.engineDeps()
+		d.Progress = app.phase
+		if err := engine.NewGVisor(d).Prepare(cmd.Context()); err != nil {
+			return err
+		}
+		app.phase("ready: gVisor " + gvisor.Version())
 	}
 	return nil
 }
@@ -508,24 +524,27 @@ func slimContainerfiles(ctx context.Context, app *App, imgDir string) (tiers, er
 	return out, nil
 }
 
-// buildWantsFirecracker decides whether `build` should also set up Firecracker.
-// With no --engine flags it follows the host's capability (same signal as the
-// create default); otherwise the flags select the engines explicitly.
-func buildWantsFirecracker(app *App, engines []string) (bool, error) {
+// buildEngines decides what `build` sets up beside the image: Firecracker's
+// artifacts, gVisor's runsc, or both. With no --engine flags it follows the
+// host's capability (same signal as the create default), which never includes
+// gVisor, since that is never a default (R173). Otherwise the flags select the
+// engines explicitly.
+func buildEngines(app *App, engines []string) (fc, gv bool, err error) {
 	if len(engines) == 0 {
-		return autoEngine(app.Host.IsMacOS) == "firecracker", nil
+		return autoEngine(app.Host.IsMacOS) == "firecracker", false, nil
 	}
-	wantFC := false
 	for _, e := range engines {
 		switch e {
 		case "podman":
 		case "firecracker":
-			wantFC = true
+			fc = true
+		case "gvisor":
+			gv = true
 		default:
-			return false, fmt.Errorf("--engine must be podman or firecracker, got %q", e)
+			return false, false, fmt.Errorf("--engine must be podman, firecracker or gvisor, got %q", e)
 		}
 	}
-	return wantFC, nil
+	return fc, gv, nil
 }
 
 // normalizeInsecure maps 1/true/yes/on -> "1", anything else -> "0" (the

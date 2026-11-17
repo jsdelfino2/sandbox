@@ -28,8 +28,9 @@ contract.
 
 | Term | Meaning |
 |---|---|
-| **sandbox** | One named, SSH-reachable Linux environment: a rootless Podman container or a rootless Firecracker microVM. |
-| **engine** | Which of the two backs a given sandbox. Chosen per sandbox with `--engine`. |
+| **sandbox** | One named, SSH-reachable Linux environment: a rootless Podman container, run by Podman's default runtime or by gVisor, or a rootless Firecracker microVM. |
+| **engine** | Which of the three backs a given sandbox: `podman`, `gvisor` or `firecracker`. Chosen per sandbox with `--engine`. |
+| **gVisor** | A kernel written in user space. Its runtime, `runsc`, runs a container's system calls in that kernel rather than in the host's (§11.6). |
 | **type** | `agent` or `user`. It decides what a sandbox may reach over SSH, and nothing else. |
 | **group** | An isolation boundary owning a network, a key pair set and a gateway. Every sandbox is in exactly one. |
 | **seed** | The per-sandbox read-only directory through which the host hands trust material and config to the guest init. |
@@ -42,8 +43,9 @@ contract.
 **R1.** A sandbox **MUST** be reachable by name, from the host and from its peers, and **MUST NOT** require a
 caller to know a port number.
 
-**R2.** The two engines **MUST** be interchangeable. They share one image, one trust model, one network
-fabric, the same sharing flags and the same agent tools.
+**R2.** The engines **MUST** be interchangeable. They share one image, one trust model, one network
+fabric, the same sharing flags and the same agent tools. The gVisor engine differs only where §11.6
+says it does.
 
 **R3.** Host data and host credentials **MUST NOT** reach a sandbox unless a flag names them. There
 is no implicit `$PWD` mount and no implicit credential. The host's git name and address are the one
@@ -55,8 +57,9 @@ exception (R68), and `--git-identity` withholds them.
 
 The engine is a choice about isolation and weight, not about capability. A Podman container shares
 the host kernel and starts fast. A Firecracker microVM boots its own kernel under hardware
-virtualization, which is the stronger boundary for untrusted or autonomous work. Everything else in
-this document holds either way.
+virtualization, which is the stronger boundary for untrusted or autonomous work. A gVisor container
+answers its system calls in gVisor's kernel, which narrows what it reaches of the host kernel without
+hardware virtualization, and costs speed. Everything else in this document holds whichever runs it.
 
 ## 3. Anatomy of a sandbox
 
@@ -1253,6 +1256,16 @@ R101 keeps the engines consistent. A microVM is reached over ssh, which lands as
 So a command behaves the same whichever engine runs it, and the files it creates are owned by you
 rather than by root.
 
+**R179.** A container create that fails **MUST** remove the container and the data volumes it made, as
+R140 asks of a microVM, and that includes a failed `podman run`. The reap **MUST NOT** remove volumes
+an earlier `rm` kept, or a container that held the name before the run.
+
+Podman makes the data volumes before it starts the container, and it can leave the container behind
+in the Created state. A volume left that way is not harmless: `ls` reads a home volume with no
+sandbox as data that `rm` kept, and lists a name nobody removed. A container that already holds the
+name can be another create of the same name that took the lock first. The run fails on it, and
+removing it would end a sandbox this create never made.
+
 ### 11.2 Nested Podman
 
 True isolated Podman-in-Podman needs a scaled-down capability set on the outer container and a
@@ -1361,6 +1374,93 @@ CS_SANDBOX_PRIVATE_REGISTRY=registry.corp.example:5000 cs-sandbox build
 Following Docker and Podman convention, the protocol is implicit in the security setting rather than
 a scheme on the value. A secure entry writes only a location; an insecure one adds `insecure = true`
 for that host alone.
+
+### 11.6 The gVisor runtime
+
+The gVisor engine is this engine with one change: the container runs under gVisor's `runsc` instead
+of Podman's default runtime. The Sentry, which is gVisor's kernel, answers the sandbox's system
+calls. It reaches the host kernel through a small filtered set of its own. A sandbox under it therefore
+reaches far less of the host kernel than a container does, and it needs no hardware virtualization.
+It is the stronger boundary on a host where Firecracker cannot run, such as a cloud machine without
+nested virtualization or a CI runner.
+
+**R172.** `--engine gvisor` **MUST** create a Podman sandbox whose container runs under `runsc`. Its
+`podman run` **MUST** differ from a Podman sandbox's only by the runtime, by the limits R176 moves
+into a scope, and by the variable that tells the guest. The group's own containers **MUST** keep the
+default runtime.
+
+**R173.** The gVisor engine **MUST** be offered on Linux only, and **MUST NOT** be a default.
+`--privileged` **MUST** be refused for it.
+
+**R174.** `runsc` **MUST** be fetched and checked as R115 to R118 say of the VMM. `build --engine
+gvisor`, or the first create that needs it, downloads it into the artifact cache. The release is
+pinned and recorded, and it is verified against a SHA-512 committed in this repository, which is the
+digest gVisor publishes. Each release **MUST** have a directory of its own, and a sandbox **MUST**
+keep the release it was created with.
+
+`CS_SANDBOX_GVISOR_VERSION` is the override R118 describes. A running Sentry is driven by the
+`runsc` that started it. Replacing that binary would leave `exec` and `stop` speaking another
+release's protocol to it, and a directory per release is what lets a new pin reach new sandboxes
+only.
+
+**R175.** `runsc` **MUST** run with `--ignore-cgroups`, `--allow-suid`, `--net-raw` and
+`--oci-seccomp`, and with no other flag that changes what a sandbox may do.
+
+Each one answers a failure that was measured:
+
+| Flag | Without it |
+|---|---|
+| `--ignore-cgroups` | Rootless `runsc` asks systemd's system bus for its cgroups, which refuses an unprivileged caller, so the container does not start. |
+| `--allow-suid` | gVisor ignores set-user-ID bits, so `sudo` (R10) fails with "effective uid is not 0". |
+| `--net-raw` | gVisor removes `CAP_NET_RAW`, which takes back a capability R102 grants. |
+| `--oci-seccomp` | gVisor does not apply the container's seccomp filter, so R103 would not hold inside the sandbox. |
+
+The flags live in a wrapper script beside the release, and `--runtime` names the wrapper. Podman
+records the runtime's path with the container and calls it again for `start`, `stop` and `exec`. A
+flag passed to `podman` itself would reach only the command that passed it.
+
+**R176.** A gVisor sandbox **MUST** run inside a systemd user scope of its own, under
+`cs-sandbox.slice`, made before the container starts on create and on every start. The scope
+**MUST** carry the sandbox's limits: `--pids` as `TasksMax`, `--cpus` as `CPUQuota`, and `--mem` as
+`MemoryMax` with no swap. R171a decides which of them apply. Where no user manager can hold the
+scope, the sandbox **MUST** start without one, and create **MUST** say that it runs without limits.
+
+With `--ignore-cgroups` the container gets no cgroup of its own, so Podman's limit flags would be
+accepted and then apply to nothing. What gVisor runs stays in the cgroup of the process that ran
+`podman`: conmon, the gofer that serves its files, and the Sentry. A scope that `podman` runs inside
+therefore holds the whole sandbox, and so does the slice above it.
+
+The Sentry runs each guest thread on a host thread, so `TasksMax` counts the guest's threads
+together with the Sentry's own. That is a wider count than the default runtime's process limit. The
+default of R171a still leaves a parallel build room.
+
+A limit binds the whole sandbox rather than one process in it. The kernel kills the Sentry when the
+sandbox passes its memory cap, and the Sentry fails when it cannot start a thread. Either way the
+sandbox stops, where under the default runtime one process would fail. The guest reads the host's
+memory size and CPU count rather than its caps, so it cannot size itself to them.
+
+**R177.** Inside a gVisor sandbox, the nested engine **MUST** default to the sandbox's own network
+namespace, and `create` **MUST** say so.
+
+Rootless Podman pins a nested container's network namespace with one `mount(2)` that passes
+`MS_BIND` together with `MS_SHARED`. Linux performs the bind and ignores the propagation flag. gVisor
+refuses the combination with `EINVAL`, so every nested container given a network of its own fails to
+start. Sharing the sandbox's namespace needs no such mount. The cost is that an inner container's
+ports are the sandbox's own: `-p` is ignored, and a service answers on the port it binds.
+
+**R178.** `create` **MUST** say that a sandbox runs under gVisor, and **MUST** name every limit it
+applied.
+
+A gVisor sandbox also differs from a Podman one where no requirement reaches:
+
+- **The root filesystem starts fresh on every start.** gVisor keeps the container's own writes in an
+  overlay inside the sandbox. The home and the nested store are volumes, so they persist. Writing
+  through to the host instead would lose file capabilities, which `newuidmap` and many packages
+  need.
+- **`podman cp` cannot reach a running gVisor sandbox**, because gVisor serves its files rather than
+  the host mounting them. `exec`, `ssh` and `scp` reach it.
+- **System calls cost more.** Starting processes and writing many small files to the home slow down
+  the most, and building code slows down the least.
 
 ## 12. The Firecracker microVM engine
 
@@ -1725,8 +1825,10 @@ pidfds, it **MUST** be signalled through one opened before that check. A record 
 
 The engine is the trust boundary, and everything else follows from that. There is no host-root path
 absent a kernel bug: the engine and the container are bounded by your unprivileged host user through
-keep-id. The microVM engine removes the shared-kernel attack surface entirely. `--privileged` trades
-that defence in depth for breadth, which is why it is a flag rather than a default.
+keep-id. The microVM engine removes the shared-kernel attack surface entirely. The gVisor engine
+narrows it: the Sentry answers the sandbox's system calls, so the host kernel sees only the ones the
+Sentry makes. `--privileged` trades that defence in depth for breadth, which is why it is a flag
+rather than a default.
 
 `CS_SANDBOX_SSH_BIND` is R142's opt-in, and it is now two decisions in one variable: setting it at all
 is what publishes a port, and its value is where that port binds. Unset, a sandbox is reached the way
@@ -1754,7 +1856,8 @@ its own user namespace rather than in this container's.
 
 **Passwordless sudo inside a sandbox is safe**, and is the usual setup for an agent sandbox. On the
 container engine, root inside is your own unprivileged host uid through `--userns=keep-id`. On the
-microVM engine it is real root confined to the guest's kernel. Either way `sudo` grants an agent
+microVM engine it is real root confined to the guest's kernel. On the gVisor engine it is root in
+the Sentry, which runs as an unprivileged host uid. On each, `sudo` grants an agent
 nothing it does not already control over its own disposable sandbox, while restricting it would add
 friction and move no boundary. This holds only while that boundary is intact: running the image
 rootful, `--privileged`, or `--userns=host` turns the same passwordless sudo into genuine host root.

@@ -1,11 +1,11 @@
 # sandbox
 
-> **Disposable, isolated Linux dev sandboxes (rootless Podman containers or Firecracker microVMs)
-> for running AI coding agents.**
+> **Disposable, isolated Linux dev sandboxes (rootless Podman containers, optionally under gVisor,
+> or Firecracker microVMs) for running AI coding agents.**
 
 [![CI](https://github.com/codesweep-ai/sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/codesweep-ai/sandbox/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Engines](https://img.shields.io/badge/engines-podman%20%C2%B7%20firecracker-informational)
+![Engines](https://img.shields.io/badge/engines-podman%20%C2%B7%20gvisor%20%C2%B7%20firecracker-informational)
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%28WSL2%29-lightgrey)
 
 `cs-sandbox` is a self-contained CLI that creates and manages these sandboxes. Each one is a
@@ -35,7 +35,7 @@ The loop is **create → work → fetch → destroy**.
 - [Agent credentials](#agent-credentials) · lending your logins and keys
 - [Before you start](#before-you-start) · one-time install + login ([INSTALL.md](INSTALL.md))
 - [Walkthroughs](#walkthroughs) · the fastest way to get a feel for it
-- [Choosing an engine](#choosing-an-engine-podman-vs-firecracker)
+- [Choosing an engine](#choosing-an-engine-podman-gvisor-or-firecracker)
 - [Who can SSH into what](#who-can-ssh-into-what) · [Security model](#security-model) · [Docs](#docs)
 - [Contributing](#contributing)
 
@@ -265,6 +265,9 @@ ssh web
 # That's Podman nested inside Podman, or Podman inside a Firecracker microVM,
 # depending on the engine - both are already set up for you.
 #
+# Under --engine gvisor a nested container shares the sandbox's network, so -p
+# publishes nothing and nginx answers on its own port: curl http://localhost:80.
+#
 # The nested engine is rootless and runs as you, so a bind mount works the way
 # you would expect: files an inner container writes come back owned by you.
 ```
@@ -378,20 +381,29 @@ cs-sandbox group rm cache-memory -f
 > DNS for one another, no route between their networks, and no SSH key the other side would accept.
 > The full model is in [SPEC.md](SPEC.md#5-groups).
 
-## Choosing an engine: Podman vs Firecracker
+## Choosing an engine: Podman, gVisor or Firecracker
 
-Both engines work the same way for almost everything: same image, trust model, sharing flags, and
-networking. They differ mostly in isolation versus weight. Pick with `--engine podman|firecracker`.
+Every engine works the same way for almost everything: same image, trust model, sharing flags, and
+networking. They differ mostly in isolation versus weight. Pick with
+`--engine podman|gvisor|firecracker`.
 
-| | **Podman container** | **Firecracker microVM** |
-|---|---|---|
-| Isolation | shares the host kernel, scaled-down capabilities | **own kernel**, hardware virtualization |
-| Root inside | rootful-in-userns (`sudo`) | **real root** |
-| Nested Podman | rootless | rootless |
-| Requires | Podman | `/dev/kvm`, Linux x86_64 |
-| Default on | macOS, and any host without x86_64 KVM | x86_64 Linux + KVM |
-| **Reach for it when** | speed, macOS | stronger isolation, untrusted workloads, nested root |
-| Specified in | [SPEC.md §11](SPEC.md#11-the-podman-container-engine) | [SPEC.md §12](SPEC.md#12-the-firecracker-microvm-engine) |
+| | **Podman container** | **gVisor container** | **Firecracker microVM** |
+|---|---|---|---|
+| Isolation | shares the host kernel, scaled-down capabilities | gVisor's own kernel, in user space, answers its system calls | **own kernel**, hardware virtualization |
+| Root inside | rootful-in-userns (`sudo`) | root in gVisor's kernel (`sudo`) | **real root** |
+| Nested Podman | rootless | rootless, on the sandbox's own network | rootless |
+| Requires | Podman | Podman, Linux | `/dev/kvm`, Linux x86_64 |
+| Default on | macOS, and any host without x86_64 KVM | never: ask for it | x86_64 Linux + KVM |
+| **Reach for it when** | speed, macOS | stronger isolation with no KVM: cloud machines, CI runners | stronger isolation, untrusted workloads, nested root |
+| Specified in | [SPEC.md §11](SPEC.md#11-the-podman-container-engine) | [SPEC.md §11.6](SPEC.md#116-the-gvisor-runtime) | [SPEC.md §12](SPEC.md#12-the-firecracker-microvm-engine) |
+
+gVisor is a kernel written in user space. A gVisor sandbox is a Podman container that `runsc`, its
+runtime, runs instead of Podman's own. The first `create --engine gvisor` downloads `runsc` and
+checks it against a digest this build pins. The isolation costs speed, most in starting processes
+and in small-file work in the home. Its root filesystem starts fresh on every `start`, while its home persists. A nested
+container shares the sandbox's network, so `-p` publishes nothing. When the sandbox reaches its
+memory or task cap, the whole sandbox stops. [SPEC.md §11.6](SPEC.md#116-the-gvisor-runtime) has the
+reasons.
 
 ## Who can SSH into what
 
@@ -431,9 +443,10 @@ independent of sandbox type. Lend deliberately, with two conditions in mind:
 
 ## Security model
 
-- **The boundary is the engine.** A Podman container shares the host kernel; a Firecracker microVM
-  boots its own kernel under hardware virtualization, the stronger choice for untrusted or
-  autonomous work.
+- **The boundary is the engine.** A Podman container shares the host kernel. A gVisor container
+  answers its system calls in gVisor's kernel, which narrows what it reaches of the host's. A
+  Firecracker microVM boots its own kernel under hardware virtualization, the stronger choice for
+  untrusted or autonomous work.
 - **Nothing shared by default.** Host data enters a sandbox only where a flag names it: `--repo` (a
   git checkout), `--snapshot` (a frozen read-only copy), and `--env` / `--env-file` (values you pass
   in). Results come back out with `cs-sandbox fetch`.

@@ -19,12 +19,13 @@ running an agent session on another sandbox.
 
 ```bash
 # Create: name + optional shares. Default type is agent; engine defaults to
-# firecracker on Linux/KVM, else podman.
+# firecracker on Linux/KVM, else podman. --engine gvisor is never a default.
 cs-sandbox create feature --repo ~/projects/api        # repo lands at ~/api on branch cs-sandbox/feature
 cs-sandbox create feature --repo ~/projects/api --lend-agent-login claude      # ...agent logged in
 cs-sandbox create dev --type user --repo ~/projects/api
 cs-sandbox create lab --yolo --solo                    # throwaway playground, no outbound ssh
 cs-sandbox create web --engine podman --snapshot ~/data # frozen read-only copy at ~/data
+cs-sandbox create ci --engine gvisor                   # gVisor's kernel in user space, no /dev/kvm needed
 
 ssh feature                     # shell in by name (preferred for interactive work)
 cs-sandbox exec feature ls      # run one command instead
@@ -147,7 +148,7 @@ git push worker:api HEAD:cs-sandbox/worker # the other direction
 | "it should already be logged in" / "don't make me log in again" | add `--lend-agent-login claude` (or `codex`) at create; `--inherit-agent-login opencode` for OpenCode, which has no login to lend |
 | "make me a workspace I can drive" / "a user sandbox" | `cs-sandbox create <name> --type user --repo <path>` |
 | "throwaway / no prompts / let it rip" | `cs-sandbox create <name> --yolo` (add `--solo` to also deny outbound ssh) |
-| "stronger isolation" / "untrusted work" | `--engine firecracker` (Linux + `/dev/kvm` only) |
+| "stronger isolation" / "untrusted work" | `--engine firecracker` (Linux + `/dev/kvm` only); `--engine gvisor` where there is no `/dev/kvm` (any Linux) |
 | "what sandboxes do I have?" / "is it still running?" | `cs-sandbox ls` — the STATUS column says `running`, `stopped`, or `removed` (data an `rm` kept) |
 | "get its changes" / "pull the work back" | `cs-sandbox fetch <name>`, then report the branch |
 | "send my commits in" | `cs-sandbox push <name>` |
@@ -158,7 +159,7 @@ git push worker:api HEAD:cs-sandbox/worker # the other direction
 | "pause it" / "free the resources" | `cs-sandbox stop <name>` (then `start` later) |
 | "keep these separate from my other sandboxes" / "two experiments at once" / "they must not interfere" | `cs-sandbox create <name> --group <group>` — each group gets its own network, keys and gateway |
 | "it says the name exists in several groups" | Address it in full: `<name>.<group>`. A bare name only ever means the `default` group |
-| "why doesn't this work?" / "check my setup" | `cs-sandbox doctor` (add `--engine podman` for that engine, `--slim` for the CI image) |
+| "why doesn't this work?" / "check my setup" | `cs-sandbox doctor` (add `--engine podman` or `--engine gvisor` for that engine, `--slim` for the CI image) |
 | "set it up" / "first run" | `cs-sandbox build`, then `cs-sandbox install-agent-tools` and `cs-sandbox install-agent-clis` |
 
 ## When to use proactively
@@ -177,6 +178,12 @@ git push worker:api HEAD:cs-sandbox/worker # the other direction
 - Firecracker needs Linux, `/dev/kvm` and x86_64; on macOS or a non-KVM host sandboxes use Podman
   automatically. `--cpus` (default 4) and `--mem` MiB (default 4096) size a microVM, and cap a
   Podman sandbox only when given. `--pids` (default 8192) is a Podman sandbox's process limit.
+- `--engine gvisor` (Linux only) runs a Podman sandbox under gVisor, a kernel in user space. The first
+  create downloads it. It is slower than Podman, and `create` prints what it gives up. Its root
+  filesystem starts fresh on every `start` (the home persists). `podman cp` cannot reach it. A
+  reached task or memory cap stops the whole sandbox, and `--pids` counts host tasks there.
+  Inside it, a nested container shares the sandbox's network: `podman run -p 8080:80` publishes
+  nothing, and the service answers on its own port (80). `uname -r` ends in `-gvisor` inside one.
 - On macOS everything runs in one podman-machine VM, and `--repo` / `--snapshot` sources must live
   under `$HOME` — `create` rejects paths outside it.
 - The agent login is **not** inherited by default — a sandbox starts with none. The usual choice is

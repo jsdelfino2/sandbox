@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codesweep-ai/sandbox/internal/engine"
+	"github.com/codesweep-ai/sandbox/internal/gvisor"
 	"github.com/codesweep-ai/sandbox/internal/lend"
 	"github.com/codesweep-ai/sandbox/internal/run"
 	"github.com/codesweep-ai/sandbox/internal/seed"
@@ -79,10 +80,10 @@ func newCreateCmd(app *App) *cobra.Command {
 	fl.StringVar(&f.group, "group", envOr("CS_SANDBOX_GROUP", state.DefaultGroup),
 		"group whose isolated network, SSH keys and gateway this sandbox joins")
 	fl.StringVar(&f.typ, "type", "agent", "sandbox type: agent | user")
-	fl.StringVar(&f.engine, "engine", envOr("CS_SANDBOX_ENGINE", ""), "engine: podman | firecracker (default: firecracker on Linux/KVM, else podman)")
+	fl.StringVar(&f.engine, "engine", envOr("CS_SANDBOX_ENGINE", ""), "engine: podman | firecracker | gvisor (default: firecracker on Linux/KVM, else podman)")
 	fl.BoolVar(&f.yolo, "yolo", false, "skip all agent permission prompts")
 	fl.BoolVar(&f.solo, "solo", false, "agent with no outbound SSH into the fabric (agent type only)")
-	fl.BoolVar(&f.privileged, "privileged", false, "podman: use --privileged instead of the scaled-down cap set")
+	fl.BoolVar(&f.privileged, "privileged", false, "podman: use --privileged instead of the scaled-down cap set (refused under gvisor)")
 	fl.StringSliceVar(&f.inheritAgentLogin, "inherit-agent-login", nil,
 		"inherit this agent's host login into the sandbox: "+strings.Join(seed.AgentNames(), " | ")+" (repeatable, comma-separated; default: inherit nothing)")
 	fl.StringSliceVar(&f.lendAgentLogin, "lend-agent-login", nil,
@@ -105,9 +106,9 @@ func newCreateCmd(app *App) *cobra.Command {
 		"where a --hard budget asks the agent to stop, as a share of each limit (default 95%)")
 	fl.StringVar(&f.gitIdentity, "git-identity", "host",
 		"whose name and address the sandbox commits as: host (your own git identity) | none | \"Name <address>\"")
-	fl.IntVar(&f.cpus, "cpus", 4, "firecracker: vCPUs; podman: a CPU cap, applied only when given")
-	fl.IntVar(&f.mem, "mem", 4096, "firecracker: memory (MiB); podman: a memory cap, applied only when given")
-	fl.IntVar(&f.pids, "pids", engine.DefaultPids, "podman: the container's process limit; 0 for none")
+	fl.IntVar(&f.cpus, "cpus", 4, "firecracker: vCPUs; podman and gvisor: a CPU cap, applied only when given")
+	fl.IntVar(&f.mem, "mem", 4096, "firecracker: memory (MiB); podman and gvisor: a memory cap, applied only when given")
+	fl.IntVar(&f.pids, "pids", engine.DefaultPids, "podman: the container's process limit; gvisor: its host task limit; 0 for none")
 	fl.IntVar(&f.disk, "disk", 0, "firecracker: disk size (GiB); grow-only, default: the base rootfs size (32)")
 	fl.BoolVar(&f.reuseKeptDisk, "reuse-kept-disk", false, "firecracker: boot the disk rm kept for this name even when another image made it")
 	fl.StringArrayVar(&f.repos, "repo", nil, "share a git repo: PATH[@REF][:NAME] (repeatable)")
@@ -117,7 +118,7 @@ func newCreateCmd(app *App) *cobra.Command {
 	fl.StringArrayVar(&f.imageStores, "image-store", nil, "mount a shared image store read-only (repeatable)")
 
 	// flag-value completion
-	_ = cmd.RegisterFlagCompletionFunc("engine", fixedComp("podman", "firecracker"))
+	_ = cmd.RegisterFlagCompletionFunc("engine", fixedComp("podman", "firecracker", "gvisor"))
 	_ = cmd.RegisterFlagCompletionFunc("type", fixedComp("agent", "user"))
 	_ = cmd.RegisterFlagCompletionFunc("inherit-agent-login", fixedComp(seed.AgentNames()...))
 	_ = cmd.RegisterFlagCompletionFunc("lend-agent-login", fixedComp(lend.SlotIDs(lend.Login)...))
@@ -135,11 +136,11 @@ func newCreateCmd(app *App) *cobra.Command {
 
 // createSizing checks the sizing flags against the engine and returns the
 // vCPUs and memory to create with. A microVM needs a size, so --cpus and --mem
-// always apply to one. A container needs none, so on podman they are caps,
-// and zero when not given.
+// always apply to one. A container needs none, so on podman and gvisor they are
+// caps, and zero when not given.
 func createSizing(f *createFlags, given func(flag string) bool) (cpus, mem int, err error) {
 	switch f.engine {
-	case "podman":
+	case "podman", "gvisor":
 		if given("cpus") && f.cpus <= 0 {
 			return 0, 0, errors.New("--cpus must be greater than zero")
 		}
@@ -168,7 +169,7 @@ func createSizing(f *createFlags, given func(flag string) bool) (cpus, mem int, 
 		}
 		return f.cpus, f.mem, nil
 	}
-	return 0, 0, fmt.Errorf("--engine must be podman or firecracker, got %q", f.engine)
+	return 0, 0, fmt.Errorf("--engine must be podman, firecracker or gvisor, got %q", f.engine)
 }
 
 func runCreate(ctx context.Context, app *App, name string, f *createFlags, cmd *cobra.Command) (err error) {
@@ -196,6 +197,11 @@ func runCreate(ctx context.Context, app *App, name string, f *createFlags, cmd *
 	// sandboxes have no such path and are unconstrained.
 	if f.engine == "firecracker" {
 		if err := state.ValidInstancePath(app.InstDir, f.group, name); err != nil {
+			return err
+		}
+	}
+	if f.engine == "gvisor" {
+		if err := gvisorCreatable(app.Host.IsMacOS, f.privileged); err != nil {
 			return err
 		}
 	}
@@ -419,6 +425,11 @@ func runCreate(ctx context.Context, app *App, name string, f *createFlags, cmd *
 	}
 	fmt.Fprintf(out, "%s %s (type=%s, engine=%s%s)\n", verb, name, f.typ, f.engine, where)
 	fmt.Fprintf(out, "  shell: ssh %s\n", name+"."+f.group)
+	if inst.Engine == state.GVisor {
+		for _, l := range gvisorLines(inst, gvisor.Version()) {
+			fmt.Fprintf(out, "  %s\n", l)
+		}
+	}
 	if len(inst.AgentLogins) > 0 {
 		fmt.Fprintf(out, "  agent login: %s (inherited from your host)\n", strings.Join(inst.AgentLogins, " + "))
 	} else if len(plan.loans) == 0 && len(plan.notes) == 0 {
@@ -483,10 +494,55 @@ func createBudget(f *createFlags) (lend.Budget, error) {
 // newEngine builds the engine f names. The flags it needs were validated by the
 // caller, which is also where an unknown name is refused.
 func newEngine(d engine.Deps, name string) engine.Engine {
-	if name == "firecracker" {
+	switch name {
+	case "firecracker":
 		return engine.NewFirecracker(d)
+	case "gvisor":
+		return engine.NewGVisor(d)
 	}
 	return engine.NewPodman(d)
+}
+
+// gvisorCreatable refuses a gvisor create that cannot be honoured, before
+// anything is provisioned (R173).
+func gvisorCreatable(isMacOS, privileged bool) error {
+	if isMacOS || runtime.GOOS != "linux" {
+		return errors.New("--engine gvisor runs on Linux only: gVisor publishes no runtime for this host — use --engine podman")
+	}
+	if privileged {
+		return engine.ErrGVisorPrivileged
+	}
+	return nil
+}
+
+// gvisorLines are what create says of a gVisor sandbox (R178): what runs it,
+// every limit that applies, and how its nested containers reach the network.
+func gvisorLines(inst *state.Instance, release string) []string {
+	var caps, stops []string
+	if inst.Pids > 0 {
+		caps = append(caps, fmt.Sprintf("%d host tasks", inst.Pids))
+		stops = append(stops, "task")
+	}
+	if inst.CPUs > 0 {
+		caps = append(caps, fmt.Sprintf("%d CPUs", inst.CPUs))
+	}
+	if inst.MemMiB > 0 {
+		caps = append(caps, fmt.Sprintf("%d MiB of memory", inst.MemMiB))
+		stops = append(stops, "memory")
+	}
+	limits := "none: nothing caps this sandbox's tasks, CPU or memory (`cs-sandbox doctor --engine gvisor` says what this host offers)"
+	if len(caps) > 0 {
+		limits = strings.Join(caps, ", ")
+	}
+	// A CPU cap throttles; the other two end the sandbox, so say which apply.
+	if len(stops) > 0 {
+		limits += "; reaching the " + strings.Join(stops, " or ") + " cap stops the whole sandbox"
+	}
+	return []string{
+		"runtime:  gVisor " + release + " answers this sandbox's system calls in a kernel of its own",
+		"limits:   " + limits,
+		"nested containers: share this sandbox's network, so podman's -p publishes nothing; a service answers on the port it binds",
+	}
 }
 
 // ensureImage fetches the sandbox image when this host does not have it, rather

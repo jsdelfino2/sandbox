@@ -60,7 +60,7 @@ COVERDIR   ?= .coverage
 COVER_ABS  := $(abspath $(COVERDIR))
 COVERFLAGS := -covermode=atomic -coverpkg=./...
 
-.PHONY: container-bins lender-bin vcr-bin help tidy-check embed-check build build-go build-ci-image build-ci-fc install uninstall test test-race tools setup-smoke test-smoke test-integration test-live-agents setup-fixtures fixtures fixtures-strict fixtures-check test-agents-replay test-agents-shared test-agents-lent coverage coverage-check coverage-baseline vet fmt fmt-check check ci prose refs oss surface ledger lint deadcode actionlint snapshot release release-check clean
+.PHONY: container-bins lender-bin vcr-bin help tidy-check embed-check build build-go build-ci-image build-ci-fc setup-gvisor install uninstall test test-race tools setup-smoke test-smoke test-integration test-live-agents setup-fixtures fixtures fixtures-strict fixtures-check test-agents-replay test-agents-shared test-agents-lent coverage coverage-check coverage-baseline vet fmt fmt-check check ci prose refs oss surface ledger lint deadcode actionlint snapshot release release-check clean
 
 .DEFAULT_GOAL := help
 
@@ -410,6 +410,12 @@ AGENTS_ENGINE ?= podman
 ## order; CI sets nothing, because there each cell is its own job.
 AGENTS_PARALLEL ?= 4
 
+##
+## gVisor's runsc is fetched here too, through setup-gvisor, wherever the gVisor
+## member could run: a Linux host with podman, and a SMOKE_TESTS that names
+## TestCLIGVisorLive. The smoke-firecracker job selects other members, so it
+## fetches nothing. The member used to skip itself on every CI leg, because
+## nothing there had ever fetched runsc.
 setup-smoke: tools
 	@if ! command -v podman >/dev/null 2>&1; then \
 		echo "setup-smoke: no podman on this host — the live members of the smoke profile will skip themselves"; \
@@ -418,6 +424,20 @@ setup-smoke: tools
 	else \
 		$(MAKE) --no-print-directory build-ci-image; \
 	fi
+	@if [ -n "$(filter TestCLIGVisorLive,$(SMOKE_TESTS))" ] && [ "$$(uname -s)" = Linux ] \
+		&& command -v podman >/dev/null 2>&1; then \
+		$(MAKE) --no-print-directory setup-gvisor; \
+	fi
+
+## setup-gvisor: gVisor's runsc, in the artifact cache, for TestCLIGVisorLive
+##
+## The shipped command, `cs-sandbox build --engine gvisor`. It downloads the
+## pinned release and checks it against the SHA-512 committed in internal/gvisor
+## (SPEC R174), so a CI run tests the pin as well as the engine. It also checks
+## the image again, which costs a no-op right after setup-smoke has built it.
+## A release already in the cache is not downloaded again.
+setup-gvisor: build-go
+	CS_SANDBOX_IMAGE=$${CS_SANDBOX_IMAGE:-$(CI_IMAGE)} ./$(BIN) build --engine gvisor $(CI_SLIM_FLAGS)
 
 ## test-smoke: the smoke profile — the subset of the live tests below that CI
 ## runs, on Linux, macOS and Windows/WSL2. Same command on every host: where an
@@ -441,6 +461,10 @@ setup-smoke: tools
 ## microVM -> sandbox -> container stack; it self-skips without /dev/kvm, the FC
 ## artifacts, or a slim image — so on the legs that lack them (macOS, WSL2) it
 ## costs nothing at all.
+##
+## TestCLIGVisorLive is the only member that reaches the gVisor engine. It
+## self-skips unless the pinned runsc is in the artifact cache, which setup-smoke
+## sees to on every Linux host with podman.
 SMOKE_TESTS ?= Smoke \
                TestPodmanCreateLive \
                TestCLICreateExecDestroyLive \
@@ -449,7 +473,8 @@ SMOKE_TESTS ?= Smoke \
                TestCLINetworkReachabilityLive \
                TestCLILendKeyLive \
                TestCLIPortForwardLive \
-               TestCLINestedSandboxInVMLive
+               TestCLINestedSandboxInVMLive \
+               TestCLIGVisorLive
 
 # Joined into one -run alternation. A backslash continuation in make becomes a
 # space, so the list is written space-separated and the spaces are substituted

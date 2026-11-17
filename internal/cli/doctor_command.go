@@ -9,6 +9,7 @@ import (
 	"github.com/codesweep-ai/sandbox/internal/doctor"
 	enginepkg "github.com/codesweep-ai/sandbox/internal/engine"
 	"github.com/codesweep-ai/sandbox/internal/fcdisk"
+	"github.com/codesweep-ai/sandbox/internal/gvisor"
 	"github.com/spf13/cobra"
 )
 
@@ -52,9 +53,9 @@ func newDoctorCmd(app *App) *cobra.Command {
 			// version, where that is the one here (R166).
 			app.useLocalBuild(cmd.Context())
 			switch engine {
-			case "podman", "firecracker":
+			case "podman", "firecracker", "gvisor":
 			default:
-				return errors.New("--engine must be podman or firecracker")
+				return errors.New("--engine must be podman, firecracker or gvisor")
 			}
 			fc := fcdisk.Cache{Dir: app.FCCache}
 			hr := app.hostRoute()
@@ -90,6 +91,9 @@ func newDoctorCmd(app *App) *cobra.Command {
 				FCCache:        fc.Dir,
 				InstDir:        app.InstDir,
 
+				GVisorPin:      gvisor.Version(),
+				GVisorReleases: gvisor.Cache{Dir: gvisor.Dir(app.FCCache)}.Releases(),
+
 				Lend: app.lendState(cmd.Context()),
 
 				BundledTools: bundled,
@@ -109,7 +113,7 @@ func newDoctorCmd(app *App) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&engine, "engine", "", "engine to check: podman | firecracker (default: same as create)")
+	cmd.Flags().StringVar(&engine, "engine", "", "engine to check: podman | firecracker | gvisor (default: same as create)")
 	cmd.Flags().BoolVar(&slim, "slim", false,
 		"check the slimmed CI image and its artifacts instead of the shipped ones")
 	return cmd
@@ -142,8 +146,8 @@ func printReport(w interface{ Write([]byte) (int, error) }, rep *doctor.Report) 
 	}
 	if rep.Issues == 0 {
 		hint := ""
-		if rep.Engine == "podman" {
-			hint = " --engine podman"
+		if rep.Engine == "podman" || rep.Engine == "gvisor" {
+			hint = " --engine " + rep.Engine
 		}
 		fmt.Fprintf(w, "All good — try: cs-sandbox create <name>%s\n", hint)
 	} else {

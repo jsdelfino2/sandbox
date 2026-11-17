@@ -21,12 +21,22 @@ import (
 
 // Podman is the rootless-container engine adapter. It drives the podman CLI
 // through the Runner, so every command it issues is assertable in tests.
-type Podman struct{ d Deps }
+type Podman struct {
+	d Deps
+	// gvisor is the gVisor release this sandbox's container runs under, or ""
+	// for Podman's default runtime (SPEC §11.6).
+	gvisor string
+}
 
 // NewPodman constructs the podman adapter.
 func NewPodman(d Deps) *Podman { return &Podman{d: d} }
 
-func (p *Podman) Name() state.Engine { return state.Podman }
+func (p *Podman) Name() state.Engine {
+	if p.gvisor != "" {
+		return state.GVisor
+	}
+	return state.Podman
+}
 
 // runParams are the fully-resolved inputs to the podman run argv. Kept separate
 // from Create so buildRunArgs is a pure, golden-testable function.
@@ -62,6 +72,10 @@ type runParams struct {
 	StoreVols []string // "vol:/var/lib/shared/<name>:ro"
 	Mounts    []string // extra -v specs (snapshots, repos)
 	Limits    containerLimits
+	// Runtime is the gVisor wrapper --runtime names, or "" for Podman's default
+	// runtime. A gVisor container's limits live on its scope instead (R176), so
+	// Limits is empty for one.
+	Runtime string
 }
 
 // obj is the host-global name of a sandbox's podman objects (container and
@@ -97,6 +111,12 @@ func buildRunArgs(p runParams) []string {
 		"--network", p.Network, "--network-alias", p.Name,
 		"--dns", p.DNSPrimary, "--dns", p.DNSGateway,
 		"--init",
+	}
+	if p.Runtime != "" {
+		// gVisor (SPEC §11.6). runsc makes no cgroup of its own, so everything it
+		// runs stays where conmon is, and no-conmon keeps conmon in the scope the
+		// caller started podman in: that scope is what holds the limits (R176).
+		a = append(a, "--runtime", p.Runtime, "--cgroups=no-conmon")
 	}
 	if p.Port != 0 {
 		a = append(a, "-p", fmt.Sprintf("%s:%d:%d", p.SSHBind, p.Port, p.IntPort))
@@ -142,6 +162,11 @@ func buildRunArgs(p runParams) []string {
 	)
 	if p.Group != "" {
 		a = append(a, "-e", "CS_SANDBOX_GROUP="+p.Group)
+	}
+	if p.Runtime != "" {
+		// Tells the entrypoint to give the nested engine this sandbox's network
+		// namespace, which is the one gVisor lets it use (R177).
+		a = append(a, "-e", "CS_SANDBOX_GVISOR=1")
 	}
 	// Derived from Obj rather than carried separately, so the label can never
 	// disagree with the object name it describes. (podmanSpec.Group is the host's
@@ -198,6 +223,9 @@ func boolFlag(b bool) string {
 // Create provisions and starts a podman-container sandbox.
 func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance, err error) {
 	d := p.d
+	if p.gvisor != "" && s.Privileged {
+		return nil, ErrGVisorPrivileged
+	}
 	idir := d.InstanceDir(s.Name)
 	seedDir := filepath.Join(idir, "seed")
 	_, dirErr := os.Stat(idir)
@@ -237,17 +265,31 @@ func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance
 		storePaths = append(storePaths, "/var/lib/shared/"+name)
 	}
 
-	// Asked only where there is a slice to join, since it costs a podman call.
-	var manager string
-	if d.Cgroups.Slice {
-		manager = PodmanCgroupManager(ctx, d.Runner)
-		if manager != "systemd" {
-			d.say("podman's cgroup manager is %q, not systemd, so this sandbox runs outside %s", manager, SliceName)
+	// A gVisor container's limits go on the scope it runs in, and its run carries
+	// none (R176). Everything else about the run is the podman engine's own.
+	var limits, scoped containerLimits
+	var notes []string
+	var scope, runtimePath string
+	if p.gvisor != "" {
+		scoped, notes, scope = d.gvisorLimits(s)
+		runtimePath = p.gvCache().Runtime(p.gvisor)
+	} else {
+		// Asked only where there is a slice to join, since it costs a podman call.
+		var manager string
+		if d.Cgroups.Slice {
+			manager = PodmanCgroupManager(ctx, d.Runner)
+			if manager != "systemd" {
+				d.say("podman's cgroup manager is %q, not systemd, so this sandbox runs outside %s", manager, SliceName)
+			}
 		}
+		limits, notes = podmanLimits(s, d.Cgroups, manager)
 	}
-	limits, notes := podmanLimits(s, d.Cgroups, manager)
 	for _, n := range notes {
 		d.note(n)
+	}
+	applied := limits
+	if p.gvisor != "" {
+		applied = scoped
 	}
 	params := runParams{
 		Name: s.Name, Obj: obj(p.d.group(), s.Name), Network: d.Network,
@@ -258,11 +300,11 @@ func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance
 		HomeVol: "cs-sandbox-home-" + obj(p.d.group(), s.Name), ContVol: "cs-sandbox-containers-" + obj(p.d.group(), s.Name),
 		SeedDir: seedDir, Image: d.Image,
 		EnvFile: envFilePath(seedDir, s.InjectedEnv), Stores: storePaths, StoreVols: storeVols, Mounts: mounts,
-		Limits: limits,
+		Limits: limits, Runtime: runtimePath,
 	}
 	inst = &state.Instance{
-		Name: s.Name, Group: p.d.group(), Type: s.Type, Engine: state.Podman, Yolo: s.Yolo, Solo: s.Solo,
-		CPUs: limits.CPUs, MemMiB: limits.MemMiB, Pids: max(limits.Pids, 0),
+		Name: s.Name, Group: p.d.group(), Type: s.Type, Engine: p.Name(), Yolo: s.Yolo, Solo: s.Solo,
+		CPUs: applied.CPUs, MemMiB: applied.MemMiB, Pids: max(applied.Pids, 0),
 		Shared: s.ImageStores, AgentLogins: agentLogins, HeldKeys: s.InheritAPIKey,
 		EnvCredentials: s.EnvCredentials, Created: nowUTC(),
 	}
@@ -306,22 +348,34 @@ func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance
 	}
 
 	argv := buildRunArgs(params)
-	if limits.Parent != "" {
+	if scope != "" {
+		argv = scopeArgv(scope, scoped, argv)
+	}
+	if limits.Parent != "" || scope != "" {
 		d.ensureSlice(ctx)
 	}
 	d.say("starting the container…")
+	// A create that fails takes away what it made (R179), including a failed
+	// run. By the time `podman run` fails, podman has made the data volumes,
+	// and it can leave the container behind in the Created state.
+	//
+	// What it found stays. Volumes an earlier `rm` kept are this name's data.
+	// A container that already holds the name belongs to something else, such
+	// as another create of the same name that took the lock first. A run fails
+	// on that container, and removing it would end a sandbox this create never
+	// made. A run that succeeds proves the name was free, so after it the
+	// container is this create's own.
 	reusingData := d.volumeExists(ctx, params.HomeVol)
-	if _, err = d.Runner.Run(ctx, run.Opts{}, argv...); err != nil {
-		return nil, fmt.Errorf("podman run: %w", err)
-	}
-	started := true
+	reap := !d.containerExists(ctx, params.Obj)
 	defer func() {
-		if err != nil && started {
-			// Preserve a home volume kept by an earlier `rm`; otherwise remove
-			// the partial container and the data volumes it just created.
+		if err != nil && reap {
 			_ = p.Remove(context.Background(), s.Name, !reusingData)
 		}
 	}()
+	if _, err = d.Runner.Run(ctx, run.Opts{}, argv...); err != nil {
+		return nil, fmt.Errorf("podman run: %w", err)
+	}
+	reap = true
 
 	if err = d.save(inst); err != nil {
 		return nil, err
@@ -330,13 +384,27 @@ func (p *Podman) Create(ctx context.Context, s CreateSpec) (inst *state.Instance
 	if err = d.waitReady(ctx, s.Name); err != nil {
 		return nil, err
 	}
-	started = false
+	// A limit is reported only where the sandbox was seen inside the scope that
+	// carries it (R178), so a scope that did not take is a sandbox with none.
+	if scope != "" && !d.DryRun && !d.inScope(ctx, s.Name, scope) {
+		d.note(s.Name + " runs outside its scope, so it runs without limits")
+		inst.CPUs, inst.MemMiB, inst.Pids = 0, 0, 0
+		if err = d.save(inst); err != nil {
+			return nil, err
+		}
+	}
 	return inst, nil
 }
 
-// Prepare is a no-op: the podman engine's only reusable artifact is the shared
-// image, which `cs-sandbox build` builds directly.
-func (p *Podman) Prepare(ctx context.Context) error { return nil }
+// Prepare fetches gVisor's runsc for a gvisor sandbox (R174). The podman
+// engine's only other reusable artifact is the shared image, which `cs-sandbox
+// build` builds directly.
+func (p *Podman) Prepare(ctx context.Context) error {
+	if p.gvisor != "" {
+		return p.prepareGVisor(ctx)
+	}
+	return nil
+}
 
 // Verify confirms the shared image is on this host, so create fails cleanly
 // (pointing at what will fix it) instead of with a raw "image not known" from
@@ -348,7 +416,13 @@ func (p *Podman) Prepare(ctx context.Context) error { return nil }
 // pull it instead would answer neither, since its failure is a registry error
 // three retries deep naming a host nobody meant to contact.
 func (p *Podman) Verify(ctx context.Context) error {
-	return VerifyImage(ctx, p.d.Runner, p.d.Image)
+	if err := VerifyImage(ctx, p.d.Runner, p.d.Image); err != nil {
+		return err
+	}
+	if p.gvisor != "" {
+		return p.gvCache().Verify(p.gvisor)
+	}
+	return nil
 }
 
 // VerifyImage reports whether the sandbox image is on this host, and of the
@@ -523,6 +597,9 @@ func (p *Podman) Start(ctx context.Context, name string) error {
 	if err := p.d.EnsureNetwork(ctx); err != nil {
 		return err
 	}
+	if p.gvisor != "" {
+		return p.startGVisor(ctx, name)
+	}
 	// The container keeps its own limits, but the slice's are runtime
 	// properties that a reboot clears.
 	p.d.ensureSlice(ctx)
@@ -606,6 +683,11 @@ func (d Deps) networkGateway(ctx context.Context) string {
 
 func (d Deps) volumeExists(ctx context.Context, vol string) bool {
 	_, err := d.Runner.Run(ctx, run.Opts{ReadOnly: true}, "podman", "volume", "exists", vol)
+	return err == nil
+}
+
+func (d Deps) containerExists(ctx context.Context, name string) bool {
+	_, err := d.Runner.Run(ctx, run.Opts{ReadOnly: true}, "podman", "container", "exists", name)
 	return err == nil
 }
 

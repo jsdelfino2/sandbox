@@ -161,6 +161,16 @@ the host's `/boot`. The reasoning is in
 [SPEC.md](SPEC.md#122-the-guest-kernel). On macOS, and on any host without x86_64 KVM, this step is
 skipped and sandboxes use Podman.
 
+### gVisor (Linux, optional)
+
+A gVisor sandbox needs nothing installed beyond Podman. The first `cs-sandbox create --engine
+gvisor` downloads gVisor's `runsc` into the artifact cache, about 65 MB, and checks it against a
+SHA-512 committed in the source. The release is pinned, `20261109.0` by default and overridable with
+`CS_SANDBOX_GVISOR_VERSION`. gVisor publishes it for x86_64 and arm64 Linux.
+
+Its limits need a systemd user session, the same one `cs-sandbox.slice` needs. Without one, a
+gVisor sandbox runs uncapped, and `create` says so. `cs-sandbox doctor --engine gvisor` checks both.
+
 ## 3. Build the sandbox artifacts
 
 Every sandbox runs from one generic image (no user identity baked in - your user is created at first
@@ -177,6 +187,7 @@ the Firecracker packages above are missing. Restrict it when you want to:
 ```bash
 cs-sandbox build --engine podman       # image only (skip Firecracker)
 cs-sandbox build --engine firecracker  # force the Firecracker set (implies the image)
+cs-sandbox build --engine gvisor       # the image, and gVisor's runsc, which no bare build fetches
 ```
 
 The image is named after the version of `cs-sandbox` that built it, and `build` looks for that one
