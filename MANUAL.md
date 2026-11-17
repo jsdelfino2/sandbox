@@ -163,7 +163,8 @@ A gVisor sandbox differs from a Podman one in four more ways:
 - `podman cp` cannot reach it. Use `exec`, `ssh` or `scp`.
 - A nested container shares the sandbox's network. gVisor refuses the mount rootless Podman pins a
   new namespace with.
-- System calls cost more, so starting processes is slower than in a Podman sandbox.
+- System calls cost more. Starting processes and writing many small files in the home are slower than
+  in a Podman sandbox.
 
 [SPEC.md §11.6](SPEC.md#116-the-gvisor-runtime) gives the reason for each.
 

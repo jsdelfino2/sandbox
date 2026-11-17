@@ -399,8 +399,8 @@ networking. They differ mostly in isolation versus weight. Pick with
 
 gVisor is a kernel written in user space. A gVisor sandbox is a Podman container that `runsc`, its
 runtime, runs instead of Podman's own. The first `create --engine gvisor` downloads `runsc` and
-checks it against a digest this build pins. The isolation costs speed, most in starting
-processes. Its root filesystem starts fresh on every `start`, while its home persists. A nested
+checks it against a digest this build pins. The isolation costs speed, most in starting processes
+and in small-file work in the home. Its root filesystem starts fresh on every `start`, while its home persists. A nested
 container shares the sandbox's network, so `-p` publishes nothing. When the sandbox reaches its
 memory or task cap, the whole sandbox stops. [SPEC.md §11.6](SPEC.md#116-the-gvisor-runtime) has the
 reasons.

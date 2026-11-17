@@ -1449,8 +1449,8 @@ A gVisor sandbox also differs from a Podman one where no requirement reaches:
   need.
 - **`podman cp` cannot reach a running gVisor sandbox**, because gVisor serves its files rather than
   the host mounting them. `exec`, `ssh` and `scp` reach it.
-- **System calls cost more.** Starting processes slows down the most, and building code slows down
-  the least.
+- **System calls cost more.** Starting processes and writing many small files to the home slow down
+  the most, and building code slows down the least.
 
 ## 12. The Firecracker microVM engine
 
