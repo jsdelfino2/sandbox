@@ -9,12 +9,29 @@
   "resolved": null,
   "stint": "gvisor branch, session agent working the owner's brief, 2026-11-16",
   "evidence": {
-    "commits": [],
+    "commits": [
+      "3f6a939",
+      "e338037",
+      "7f153ba"
+    ],
     "integrated": [],
     "verified": null
   },
   "resolution": null,
   "details": "A sandbox is either a rootless Podman container, which shares the host kernel, or a Firecracker microVM, which needs KVM. Cloud machines without nested virtualization and most CI runners can offer only the first. With gVisor's `runsc`, a container's system calls run in a kernel written in user space. That narrows what the container reaches of the host kernel, without hardware virtualization.\n\nThe owner pointed Podman at `runsc` through `CONTAINERS_CONF_OVERRIDE` and ran the unmodified `cs-sandbox create --engine podman`. Create, `exec`, ssh from the host and between peers, the toolchains, and `group rm` all worked. Three things did not, and this session measured why:\n\n- **No start without `--ignore-cgroups`.** Rootless `runsc` asks systemd's system bus for its cgroups and is refused (`Access denied as the requested operation requires interactive authentication`). With the flag it starts, and every limit `create` sets applies to nothing.\n- **`sudo` fails** with `effective uid is not 0`. runsc carries the reason in its own strings: `--allow-suid is disabled, SUID/SGID bits on executables will be ignored`. A sandbox started with `--allow-suid` runs `sudo -n true`, and one started without it fails.\n- **Nested containers fail** with `failed to bind mount ns ... invalid argument`. Under strace, the nested podman calls `mount(\"/proc/thread-self/ns/net\", ..., MS_BIND|MS_REC|MS_SHARED)`. Linux ignores the propagation flag beside `MS_BIND`. gVisor returns `EINVAL`, and the same call with `MS_BIND` alone succeeds. A nested container on the sandbox's own network namespace runs.\n\nThe work is to offer gVisor as an engine of its own, fetch `runsc` the way the VMM is fetched, and fix or name each of the three.",
-  "notes": [],
+  "notes": [
+    {
+      "date": "2026-11-17",
+      "text": "Commit 3f6a939 adds `--engine gvisor`, and e338037 and 7f153ba refine what it says. The first `create`, or `build --engine gvisor`, fetches runsc release 20261109.0 into the artifact cache. It checks the archive against a SHA-512 committed in `internal/gvisor`. The container runs under a wrapper that passes `--ignore-cgroups`, `--allow-suid`, `--net-raw` and `--oci-seccomp`.\n\nA systemd user scope under `cs-sandbox.slice` holds conmon, the gofer and the Sentry. It carries `--pids`, `--cpus` and `--mem` as TasksMax, CPUQuota and MemoryMax, and is made again on every start. Under gVisor the entrypoint gives the nested engine `netns = \"host\"`. So `sudo` and the limits are fixed. Nested containers run on the sandbox's own network, which `create` and the documents say."
+    },
+    {
+      "date": "2026-11-17",
+      "text": "Verified on this host, Fedora 44 with kernel 7.3.3 and rootless Podman 5.8.9. `make ci` passed over the working tree that became 3f6a939, and again over the one that became 7f153ba. In both runs TestCLIGVisorLive passed its running, nested and restart subtests. `make test-agents-replay AGENTS_ENGINE=gvisor` passed all six cells, lent and shared.\n\nBy hand, `--repo`, `--snapshot`, `fetch`, `push`, `forward` and peer ssh all worked. Walkthrough 4's nginx answered on port 80 and not on 8080, as documented. In a probe scope, a 1.5 GiB allocation under a 1 GiB MemoryMax ended the sandbox with exit 137. TasksMax=200 did the same to a guest that started 400 processes."
+    },
+    {
+      "date": "2026-11-17",
+      "text": "Measured against a Podman sandbox at the same time, with the host's load average near 11. Writing 5,000 small files ran 2.5 times slower in the root filesystem and 7 times slower in the home. A small Go build ran 1.6 times slower, and starting 300 processes 6 times slower.\n\nNothing here ran on GitHub CI, arm64, WSL2 or macOS. Host-route, image stores and gVisor's KVM platform are untested. CI does not fetch runsc yet, so TestCLIGVisorLive skips there, and this stays open until a run covers it."
+    }
+  ],
   "links": []
 }
