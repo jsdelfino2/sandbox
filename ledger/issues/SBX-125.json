@@ -3,18 +3,25 @@
   "title": "A create whose podman run fails leaves its two volumes, and ls then lists a sandbox nobody removed",
   "type": "defect",
   "severity": "low",
-  "status": "open",
+  "status": "closed",
   "foundBy": "session agent, 2026-11-16, while a gVisor experiment's `create --privileged` failed at `podman run`",
   "opened": "2026-11-16",
-  "resolved": null,
-  "stint": null,
+  "resolved": "2026-11-17",
+  "stint": "gvisor branch, session agent, 2026-11-17, the owner's ask",
   "evidence": {
-    "commits": [],
+    "commits": [
+      "a8cbb28"
+    ],
     "integrated": [],
-    "verified": null
+    "verified": "go test ./internal/engine/ -count=1 -run TestPodmanCreateReapsAFailedRun: 6 subtests PASS, for a fresh name, data kept by rm and a name already held, each on podman and gvisor. On the code before the fix the 4 fresh-name and kept-data subtests fail. On this host, with a stand-in runsc that refuses every container: the build before the fix left cs-sandbox-home-b1.sbx125old, cs-sandbox-containers-b1.sbx125old and a Created container, and ls listed b1 as removed. The fixed build left no volume and no container, and ls listed nothing. A failed create over data that rm kept left both volumes and the marker file in the home. make ci passed over the working tree that became af200a5 and a8cbb28."
   },
-  "resolution": null,
+  "resolution": "Fixed. Create arms its reap before `podman run` rather than after it, and first asks whether a container already holds the name. A failed run then removes the container and the data volumes it made. It keeps volumes an earlier `rm` kept, and leaves a container it found. SPEC R179 states the rule.",
   "details": "`Podman.Create` (internal/engine/podman.go) returns as soon as `podman run` fails. The deferred reap that removes a partial sandbox is armed only after the run succeeds. Podman has already created the named volumes the run mounts by then, `cs-sandbox-home-<name>.<group>` and `cs-sandbox-containers-<name>.<group>`, so both stay. `ls` reads a home volume with no instance as data `rm` kept, and lists the name as `removed`.\n\nSeen on 2026-11-16 in an experiment group: `create gp1 --group gvexp2 --privileged` under gVisor failed at `podman run`, and `group rm gvexp2 -f` then left both volumes. To reproduce, make `podman run` fail after it has parsed its volumes, for example with a runtime that refuses the container. A create that never ran should leave nothing behind, so the reap belongs before the run, scoped to volumes this create made (`reusingData` already tells the two apart).",
-  "notes": [],
+  "notes": [
+    {
+      "date": "2026-11-17",
+      "text": "a8cbb28 is on the local gvisor branch, which is neither pushed nor merged. The fix is in the podman engine's create, so podman and gVisor sandboxes both have it."
+    }
+  ],
   "links": []
 }

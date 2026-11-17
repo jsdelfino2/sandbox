@@ -12,7 +12,8 @@
     "commits": [
       "3f6a939",
       "e338037",
-      "7f153ba"
+      "7f153ba",
+      "af200a5"
     ],
     "integrated": [],
     "verified": null
@@ -31,6 +32,10 @@
     {
       "date": "2026-11-17",
       "text": "Measured against a Podman sandbox at the same time, with the host's load average near 11. Writing 5,000 small files ran 2.5 times slower in the root filesystem and 7 times slower in the home. A small Go build ran 1.6 times slower, and starting 300 processes 6 times slower.\n\nNothing here ran on GitHub CI, arm64, WSL2 or macOS. Host-route, image stores and gVisor's KVM platform are untested. CI does not fetch runsc yet, so TestCLIGVisorLive skips there, and this stays open until a run covers it."
+    },
+    {
+      "date": "2026-11-17",
+      "text": "Commit af200a5 makes `make setup-smoke` run `cs-sandbox build --engine gvisor` on a Linux host with podman, when SMOKE_TESTS names TestCLIGVisorLive. CI's ubuntu-26.04, ubuntu-26.04-arm and WSL2 smoke legs all run setup-smoke, so each now fetches the pinned release and checks its digest. The ubuntu-26.04 job prints `doctor --engine gvisor` and the AppArmor userns setting first. Local make ci over that tree fetched runsc inside setup-smoke, and TestCLIGVisorLive passed its three subtests.\n\nThe branch is not pushed, so no CI run has executed the member yet. This stays open until one passes it."
     }
   ],
   "links": []
